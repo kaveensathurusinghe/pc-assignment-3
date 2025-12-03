@@ -1,0 +1,10 @@
+# Compiled executables
+knn_serial
+
+# Object files
+*.o
+*.obj
+
+# Other compiled files
+*.out
+*.exe
