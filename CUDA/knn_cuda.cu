@@ -4,7 +4,6 @@
 #include <string.h>
 #include <cuda_runtime.h>
 
-// CUDA error checking macro
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t error = call; \
@@ -15,33 +14,31 @@
         } \
     } while(0)
 
-// Structure to hold a single data point
 typedef struct {
     double *features;
     int label;
     int id;
 } DataPoint;
 
-// Structure to hold distance-label pairs for sorting
 typedef struct {
     double distance;
     int label;
 } DistanceLabel;
 
-// Structure to hold a dataset
 typedef struct {
     DataPoint *points;
     int num_points;
     int num_features;
 } Dataset;
 
-// Function prototypes
+int BLOCK_SIZE_X = 16;
+int BLOCK_SIZE_Y = 16;
+
 Dataset* load_csv(const char *filename);
 void free_dataset(Dataset *dataset);
 int find_max_label(Dataset *dataset);
 int compare_distance(const void *a, const void *b);
 
-// CUDA kernel to calculate distances for multiple test points with configurable block size
 __global__ void calculate_distances_batch_kernel(
     double *train_features,
     double *test_features,
@@ -64,7 +61,6 @@ __global__ void calculate_distances_batch_kernel(
     }
 }
 
-// Batch prediction function using GPU with configurable block dimensions
 void knn_predict_batch_gpu(
     double *d_train_features,
     int *d_train_labels,
@@ -74,9 +70,7 @@ void knn_predict_batch_gpu(
     int num_test,
     int num_features,
     int k,
-    int num_classes,
-    int block_dim_x,
-    int block_dim_y
+    int num_classes
 ) {
     double *d_test_features, *d_distances;
     CUDA_CHECK(cudaMalloc(&d_test_features, num_test * num_features * sizeof(double)));
@@ -86,10 +80,12 @@ void knn_predict_batch_gpu(
                          num_test * num_features * sizeof(double), 
                          cudaMemcpyHostToDevice));
     
-    // Use configurable block dimensions
-    dim3 threads_per_block(block_dim_x, block_dim_y);
-    dim3 num_blocks((num_train + block_dim_x - 1) / block_dim_x, 
-                    (num_test + block_dim_y - 1) / block_dim_y);
+    dim3 threads_per_block(BLOCK_SIZE_X, BLOCK_SIZE_Y);
+    dim3 num_blocks((num_train + BLOCK_SIZE_X - 1) / BLOCK_SIZE_X, 
+                    (num_test + BLOCK_SIZE_Y - 1) / BLOCK_SIZE_Y);
+    
+    printf("CUDA Configuration: Block size (%d, %d), Grid size (%d, %d)\n",
+           BLOCK_SIZE_X, BLOCK_SIZE_Y, num_blocks.x, num_blocks.y);
     
     calculate_distances_batch_kernel<<<num_blocks, threads_per_block>>>(
         d_train_features, d_test_features, d_distances, 
@@ -148,7 +144,6 @@ void knn_predict_batch_gpu(
 int compare_distance(const void *a, const void *b) {
     DistanceLabel *dl_a = (DistanceLabel*)a;
     DistanceLabel *dl_b = (DistanceLabel*)b;
-    
     if (dl_a->distance < dl_b->distance) return -1;
     if (dl_a->distance > dl_b->distance) return 1;
     return 0;
@@ -158,21 +153,18 @@ int main(int argc, char *argv[]) {
     char *train_file = "iris_train.csv";
     char *test_file = "iris_test.csv";
     int k = 3;
-    int block_dim_x = 16;
-    int block_dim_y = 16;
     
-    // Parse command line arguments
     if (argc >= 4) {
         train_file = argv[1];
         test_file = argv[2];
         k = atoi(argv[3]);
     }
+    
     if (argc >= 6) {
-        block_dim_x = atoi(argv[4]);
-        block_dim_y = atoi(argv[5]);
+        BLOCK_SIZE_X = atoi(argv[4]);
+        BLOCK_SIZE_Y = atoi(argv[5]);
     }
     
-    // Check CUDA device
     int device_count = 0;
     CUDA_CHECK(cudaGetDeviceCount(&device_count));
     if (device_count == 0) {
@@ -182,53 +174,20 @@ int main(int argc, char *argv[]) {
     
     cudaDeviceProp device_prop;
     CUDA_CHECK(cudaGetDeviceProperties(&device_prop, 0));
-    printf("========================================\n");
-    printf("CUDA Configuration\n");
-    printf("========================================\n");
-    printf("Device: %s\n", device_prop.name);
-    printf("Compute capability: %d.%d\n", device_prop.major, device_prop.minor);
-    printf("Max threads per block: %d\n", device_prop.maxThreadsPerBlock);
-    printf("Max block dimensions: (%d, %d, %d)\n", 
-           device_prop.maxThreadsDim[0], 
-           device_prop.maxThreadsDim[1], 
-           device_prop.maxThreadsDim[2]);
-    printf("Max grid dimensions: (%d, %d, %d)\n", 
-           device_prop.maxGridSize[0], 
-           device_prop.maxGridSize[1], 
-           device_prop.maxGridSize[2]);
-    printf("Warp size: %d\n", device_prop.warpSize);
-    printf("========================================\n\n");
+    printf("GPU: %s (Compute %d.%d)\n", device_prop.name, device_prop.major, device_prop.minor);
     
-    printf("Execution Parameters:\n");
-    printf("  Train file: %s\n", train_file);
-    printf("  Test file: %s\n", test_file);
-    printf("  k = %d\n", k);
-    printf("  Block dimensions: (%d, %d)\n", block_dim_x, block_dim_y);
-    printf("  Threads per block: %d\n\n", block_dim_x * block_dim_y);
-    
-    // Load datasets
     Dataset *train_data = load_csv(train_file);
-    if (!train_data) {
-        fprintf(stderr, "Failed to load training data\n");
-        return 1;
-    }
+    if (!train_data) return 1;
     
     Dataset *test_data = load_csv(test_file);
     if (!test_data) {
-        fprintf(stderr, "Failed to load test data\n");
         free_dataset(train_data);
         return 1;
     }
     
-    printf("Dataset loaded successfully!\n");
-    printf("Training samples: %d\n", train_data->num_points);
-    printf("Test samples: %d\n", test_data->num_points);
-    printf("Features per sample: %d\n", train_data->num_features);
-    
     int max_train_label = find_max_label(train_data);
     int max_test_label = find_max_label(test_data);
     int num_classes = (max_train_label > max_test_label ? max_train_label : max_test_label) + 1;
-    printf("Number of classes: %d\n\n", num_classes);
     
     if (train_data->num_features != test_data->num_features) {
         fprintf(stderr, "Error: Feature dimension mismatch!\n");
@@ -241,7 +200,9 @@ int main(int argc, char *argv[]) {
     int num_test = test_data->num_points;
     int num_features = train_data->num_features;
     
-    // Flatten data
+    printf("Dataset: %d train, %d test, %d features, %d classes\n",
+           num_train, num_test, num_features, num_classes);
+    
     double *h_train_features = (double*)malloc(num_train * num_features * sizeof(double));
     int *h_train_labels = (int*)malloc(num_train * sizeof(int));
     double *h_test_features = (double*)malloc(num_test * num_features * sizeof(double));
@@ -261,7 +222,6 @@ int main(int argc, char *argv[]) {
         h_test_labels[i] = test_data->points[i].label;
     }
     
-    // Allocate device memory
     double *d_train_features;
     int *d_train_labels;
     CUDA_CHECK(cudaMalloc(&d_train_features, num_train * num_features * sizeof(double)));
@@ -274,28 +234,23 @@ int main(int argc, char *argv[]) {
                          num_train * sizeof(int), 
                          cudaMemcpyHostToDevice));
     
-    // Create CUDA events for timing
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
     
-    // Start timing
     CUDA_CHECK(cudaEventRecord(start));
     
-    // Perform KNN classification with specified block dimensions
     int *h_predictions = (int*)malloc(num_test * sizeof(int));
     knn_predict_batch_gpu(d_train_features, d_train_labels, h_test_features, 
                          h_predictions, num_train, num_test, num_features, 
-                         k, num_classes, block_dim_x, block_dim_y);
+                         k, num_classes);
     
-    // Stop timing
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
     
     float execution_time = 0;
     CUDA_CHECK(cudaEventElapsedTime(&execution_time, start, stop));
     
-    // Calculate accuracy
     int correct_predictions = 0;
     for (int i = 0; i < num_test; i++) {
         if (h_predictions[i] == h_test_labels[i]) {
@@ -305,22 +260,9 @@ int main(int argc, char *argv[]) {
     
     double accuracy = (double)correct_predictions / num_test * 100.0;
     
-    printf("========================================\n");
-    printf("Results\n");
-    printf("========================================\n");
-    printf("Configuration: Block(%d,%d) = %d threads\n", 
-           block_dim_x, block_dim_y, block_dim_x * block_dim_y);
-    printf("Correct predictions: %d/%d\n", correct_predictions, num_test);
-    printf("Accuracy: %.2f%%\n", accuracy);
-    printf("Execution time: %.4f ms\n", execution_time);
-    printf("========================================\n");
+    printf("\nRESULTS: Accuracy=%.2f%%, Time=%.4f ms, k=%d\n",
+           accuracy, execution_time, k);
     
-    // Output for easy parsing by benchmark script
-    printf("\nCSV_OUTPUT:%d,%d,%d,%.4f,%.2f\n", 
-           block_dim_x, block_dim_y, block_dim_x * block_dim_y, 
-           execution_time, accuracy);
-    
-    // Clean up
     free(h_train_features);
     free(h_train_labels);
     free(h_test_features);
@@ -336,19 +278,13 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-// CSV loading function
 Dataset* load_csv(const char *filename) {
     FILE *file = fopen(filename, "r");
-    if (!file) {
-        fprintf(stderr, "Error: Could not open file %s\n", filename);
-        return NULL;
-    }
+    if (!file) return NULL;
     
     int num_lines = 0;
     char buffer[1024];
-    while (fgets(buffer, sizeof(buffer), file)) {
-        num_lines++;
-    }
+    while (fgets(buffer, sizeof(buffer), file)) num_lines++;
     rewind(file);
     
     if (num_lines == 0) {
@@ -363,49 +299,26 @@ Dataset* load_csv(const char *filename) {
     }
     
     dataset->points = (DataPoint*)malloc(num_lines * sizeof(DataPoint));
-    if (!dataset->points) {
-        free(dataset);
-        fclose(file);
-        return NULL;
-    }
-    
     dataset->num_points = 0;
     dataset->num_features = 0;
     
     while (fgets(buffer, sizeof(buffer), file)) {
         buffer[strcspn(buffer, "\n")] = 0;
-        
-        if (strlen(buffer) == 0) {
-            continue;
-        }
+        if (strlen(buffer) == 0) continue;
         
         int features_in_line = 1;
         for (int i = 0; buffer[i] != '\0'; i++) {
-            if (buffer[i] == ',') {
-                features_in_line++;
-            }
+            if (buffer[i] == ',') features_in_line++;
         }
         
         if (dataset->num_features == 0) {
             dataset->num_features = features_in_line - 1;
         }
         
-        if (features_in_line != dataset->num_features + 1) {
-            continue;
-        }
+        if (features_in_line != dataset->num_features + 1) continue;
         
         dataset->points[dataset->num_points].features = 
             (double*)malloc(dataset->num_features * sizeof(double));
-        
-        if (!dataset->points[dataset->num_points].features) {
-            for (int i = 0; i < dataset->num_points; i++) {
-                free(dataset->points[i].features);
-            }
-            free(dataset->points);
-            free(dataset);
-            fclose(file);
-            return NULL;
-        }
         
         char *token = strtok(buffer, ",");
         int feature_idx = 0;
@@ -418,8 +331,6 @@ Dataset* load_csv(const char *filename) {
         
         if (token != NULL) {
             dataset->points[dataset->num_points].label = atoi(token);
-        } else {
-            dataset->points[dataset->num_points].label = -1;
         }
         
         dataset->points[dataset->num_points].id = dataset->num_points;
@@ -431,17 +342,13 @@ Dataset* load_csv(const char *filename) {
 }
 
 int find_max_label(Dataset *dataset) {
-    if (!dataset || dataset->num_points == 0) {
-        return -1;
-    }
-    
+    if (!dataset || dataset->num_points == 0) return -1;
     int max_label = dataset->points[0].label;
     for (int i = 1; i < dataset->num_points; i++) {
         if (dataset->points[i].label > max_label) {
             max_label = dataset->points[i].label;
         }
     }
-    
     return max_label;
 }
 
