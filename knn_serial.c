@@ -81,7 +81,6 @@ int main(int argc, char *argv[]) {
     clock_t start_time = clock();
     
     int correct_predictions = 0;
-    printf("Starting KNN classification...\n");
     
     for (int i = 0; i < test_data->num_points; i++) {
         double *test_point = test_data->points[i].features;
@@ -94,9 +93,6 @@ int main(int argc, char *argv[]) {
             correct_predictions++;
         }
         
-        printf("Test sample %3d: Predicted = %d, Actual = %d %s\n",
-               i + 1, predicted_label, true_label,
-               is_correct ? "✓" : "✗");
     }
     
     clock_t end_time = clock();
